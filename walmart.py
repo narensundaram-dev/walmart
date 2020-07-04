@@ -5,11 +5,8 @@ import json
 import shutil
 import logging
 import argparse
-import traceback
-from pprint import pprint
 from datetime import datetime as dt
 from urllib.parse import urlsplit, parse_qs
-from concurrent.futures import as_completed, ThreadPoolExecutor
 
 import requests
 import pandas as pd
@@ -97,13 +94,13 @@ class WalmartProductList:
 
         count = 1
         while True:
-            log.info(f"            *** Page: {page} ***            ")
             url = URL_PRODUCT_LIST.format(limit=LIMIT, page=page, store_id=STORE_ID, node_id=self.node_id)
             response = requests.get(url=url, headers=HEADERS).json()
 
             if not response["products"]:
                 break
 
+            log.info(f"            *** Page: {page} ***            ")
             for idx, product in enumerate(response["products"]):
                 product_detail = WalmartProductDetail(product["USItemId"], product["basic"]["productUrl"])
                 data.append(product_detail.get())

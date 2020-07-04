@@ -1,0 +1,3 @@
+- Add urls in url_categories.txt
+- Install pandas, requests packages
+- Run "python3.6 walmart.py"
