@@ -169,7 +169,11 @@ class WalmartManager:
 
     def save(self):
         df = pd.DataFrame(self.data)
-        df.to_excel(self.file_xlsx, index=False)
+        df["category"] = self.meta["categ"].replace("-", " ")
+        df["sub_category"] = self.meta["sub_categ"].replace("-", " ")
+        columns = ["sku", "name", "category", "sub_category", "mrp", "cost_price", "weight", "details", "nutrition_facts", "url_image", "url"]
+        df_ordered = df[columns]
+        df_ordered.to_excel(self.file_xlsx, index=False)
         log.info("Fetched data has been stored in {} file".format(self.file_xlsx))
 
 
