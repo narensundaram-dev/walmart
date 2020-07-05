@@ -5,6 +5,7 @@ import json
 import shutil
 import logging
 import argparse
+import traceback
 from datetime import datetime as dt
 from urllib.parse import urlsplit, parse_qs
 
@@ -30,13 +31,15 @@ log = get_logger(__file__)
 
 class WalmartProductDetail:
 
-    def __init__(self, sku, url):
-        self.sku = sku
+    def __init__(self, product_id, url, manager):
+        self.product_id = product_id
         self.url = url
+        self.manager = manager
 
     def save_image(self, url_image):
         if url_image != "NA":
-            fp = os.path.join(WalmartManager.dir_images, f"{self.sku}.jpeg")
+            extn = re.search(r"(\.\w+)\?", url_image).group(1)
+            fp = os.path.join(self.manager.dir_images, f"{self.product_id}.{extn}")
             response = requests.get(url_image, stream=True)
             if response.status_code == 200:
                 with open(fp, "wb+") as f:
@@ -62,14 +65,15 @@ class WalmartProductDetail:
         return details
 
     def get(self):
-        url = URL_PRODUCT_DETAIL.format(sku=self.sku, store_id=STORE_ID)
+        url = URL_PRODUCT_DETAIL.format(product_id=self.product_id, store_id=STORE_ID)
         response = requests.get(url, headers=HEADERS).json()
 
         details = self.get_details(response.get("detailed", {}))
         url_image = response.get("basic", {}).get("image", {}).get("large", "NA")
         self.save_image(url_image)
         return {
-            "sku": self.sku,
+            "sku": response.get("sku", "NA"),
+            "product_code": response.get("detailed", {}).get("productCode", "NA"),
             "name": response.get("basic", {}).get("name", "NA"),
             "mrp": response.get("store", {}).get("price", {}).get("previousPrice", None),
             "cost_price": response.get("store", {}).get("price", {}).get("displayPrice", None),
@@ -83,10 +87,11 @@ class WalmartProductDetail:
 
 class WalmartProductList:
 
-    def __init__(self, url, page_count, node_id):
+    def __init__(self, url, type_, id_, manager):
         self.url = url
-        self.page_count = page_count
-        self.node_id = node_id
+        self.type = type_
+        self.id = id_
+        self.manager = manager
 
     def get(self):
         page = 1
@@ -94,17 +99,22 @@ class WalmartProductList:
 
         count = 1
         while True:
-            url = URL_PRODUCT_LIST.format(limit=LIMIT, page=page, store_id=STORE_ID, node_id=self.node_id)
+            if self.type == "node":
+                url = URL_PRODUCT_LIST_NODE.format(limit=LIMIT, page=page, store_id=STORE_ID, node_id=self.id)
+            else:
+                url = URL_PRODUCT_LIST_SHELF.format(limit=LIMIT, page=page, store_id=STORE_ID, shelf_id=self.id)
             response = requests.get(url=url, headers=HEADERS).json()
 
             if not response["products"]:
                 break
 
             log.info(f"            *** Page: {page} ***            ")
-            for idx, product in enumerate(response["products"]):
-                product_detail = WalmartProductDetail(product["USItemId"], product["basic"]["productUrl"])
+            for product in response["products"]:
+                product_detail = WalmartProductDetail(product["USItemId"], product["basic"]["productUrl"], self.manager)
                 data.append(product_detail.get())
-                log.info(f"{count} products has been fetched so far ...")
+
+                if count % 5 == 0:
+                    log.info(f"{count} products has been fetched so far ...")
                 count += 1
 
             page += 1
@@ -113,17 +123,19 @@ class WalmartProductList:
 
 
 class WalmartManager:
-    dir_output = "output"
-    dir_xlsx = os.path.join(dir_output, "xlsx")
+    dir_output = os.path.join(os.getcwd(), "output")
     dir_images = os.path.join(dir_output, "images")
 
     def __init__(self, url):
         self.url = url
+        self.type = "node" if "aisle=" in self.url else "shelf"
         self.meta = self.load_meta_data()
 
-        self.dir_xlsx = WalmartManager.dir_xlsx
-        self.dir_images = os.path.join(WalmartManager.dir_images, self.meta["categ"])
-        WalmartManager.dir_images = self.dir_images
+        self.dir_xlsx = os.path.join(WalmartManager.dir_output, "xlsx")
+        if self.type == "node":
+            self.dir_images = os.path.join(WalmartManager.dir_output, "images", self.meta["categ"])
+        else:
+            self.dir_images = os.path.join(WalmartManager.dir_output, "images", f"shelf_id_{self.get_shelf_id()}")
         self.file_xlsx = os.path.join(self.dir_xlsx, self.get_xlsx_filename())
 
         self.data = []
@@ -135,36 +147,50 @@ class WalmartManager:
     def load_meta_data(self):
         meta = {}
 
-        node_id = self.get_node_id()
-        url = URL_PRODUCT_LIST.format(limit=1, page=1, store_id=STORE_ID, node_id=node_id)
+        if self.type == "node":
+            node_id = self.get_node_id()
+            url = URL_PRODUCT_LIST_NODE.format(limit=1, page=1, store_id=STORE_ID, node_id=node_id)
+        else:
+            shelf_id = self.get_shelf_id()
+            url = URL_PRODUCT_LIST_NODE.format(limit=1, page=1, store_id=STORE_ID, node_id=shelf_id)
+
         response = requests.get(url, headers=HEADERS).json()
 
         meta["categ"], meta["sub_categ"] = self.get_categ(response)
-        meta["page_count"] = self.get_page_count(response)
         return meta
 
     def get_xlsx_filename(self):
-        categ, sub_categ = self.meta["categ"], self.meta["sub_categ"]
-        return f"{categ}_{sub_categ}.xlsx"
+        if self.type == "node":
+            categ, sub_categ = self.meta["categ"], self.meta["sub_categ"]
+            return f"{categ}_{sub_categ}.xlsx"
+        else:
+            return f"shelf_id_{self.get_shelf_id()}.xlsx"
 
     def get_categ(self, response):
         categs = []
-        for categ in response["browseTitles"]:
+        for categ in response.get("browseTitles", []):
             categs.append(categ["name"].replace(" ", "-"))
 
-        return categs[:2] if len(categs) >= 2 else [categs[0], ""]
-
-    def get_page_count(self, response):
-        total = response["totalCount"]
-        log.info(f"{total} products found!")
-        return math.ceil(total / LIMIT)
+        if categs:
+            return categs[:2] if len(categs) >= 2 else [categs[0], ""]
+        else:
+            return "", ""
 
     def get_node_id(self):
         params = parse_qs(urlsplit(self.url).query)
         return params["aisle"][0]
 
+    def get_shelf_id(self):
+        params = parse_qs(urlsplit(self.url).query)
+        return params["shelfId"][0]
+
     def get(self):
-        self.data = WalmartProductList(url=self.url, page_count=self.meta["page_count"], node_id=self.get_node_id()).get()
+        self.data = WalmartProductList(
+            url=self.url, 
+            type_=self.type,
+            id_=self.get_node_id() if self.type == "node" else self.get_shelf_id(),
+            manager=self
+            ).get()
         return self
 
     def save(self):
@@ -174,30 +200,34 @@ class WalmartManager:
         columns = ["sku", "name", "category", "sub_category", "mrp", "cost_price", "weight", "details", "nutrition_facts", "url_image", "url"]
         df_ordered = df[columns]
         df_ordered.to_excel(self.file_xlsx, index=False)
-        log.info("Fetched data has been stored in {} file".format(self.file_xlsx))
-
-
-def get_args():
-    arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('-log-level', '--log_level', type=str, choices=(INFO, DEBUG), default=INFO)
-    return arg_parser.parse_args()
+        log.info(f"Fetched data ({len(df_ordered)}) has been stored in {self.file_xlsx} file")
 
 
 def main():
     start = dt.now()
     log.info("Script starts at: {}".format(start.strftime("%d-%m-%Y %H:%M:%S %p")))
 
-    args = get_args()
     with open("url_categories.txt", "r") as f:
-        for url in f.readlines():
-            url = url.strip()
+        urls = f.read().strip().split("\n")
 
+    urls_done = []
+    try:
+        for url in urls:
             print("-----------" + "-" * len(url))
             print(f"Fetching: {url}")
             print("-----------" + "-" * len(url))
             walmart = WalmartManager(url)
             walmart.setup()
             walmart.get().save()
+
+            urls_done.append(url)
+    except Exception as e:
+        log.error(f"Error: {e}")
+        print(traceback.print_exc())
+        urls_pending = list((set(urls) - set(urls_done)))
+        with open("urls_pending.txt", "w+") as f:
+            f.write("\n".join(urls_pending))
+            log.info("Pending urls to be fetched are stored in urls_pending.txt")
     
     end = dt.now()
     log.info("Script ends at: {}".format(end.strftime("%d-%m-%Y %H:%M:%S %p")))
