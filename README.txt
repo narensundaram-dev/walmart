@@ -1,3 +1,4 @@
 - Add urls in url_categories.txt
 - Install pandas, requests packages
 - Run "python3.6 walmart.py"
+- Run in Batch process: "python3.6 walmart.py --batch-mode"

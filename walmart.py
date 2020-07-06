@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import math
 import json
 import shutil
@@ -38,15 +39,15 @@ class WalmartProductDetail:
 
     def save_image(self, url_image):
         if url_image != "NA":
-            extn = re.search(r"(\.\w+)\?", url_image).group(1)
+            extn = re.search(r"(\.[\w-]+)\?", url_image).group(1)
             fp = os.path.join(self.manager.dir_images, f"{self.product_id}.{extn}")
 
             retry_limit, retry = RETRY_LIMIT, 0
             while True:
                 try:
-                    if retry > retry_limit:
+                    if retry >= retry_limit:
                         log.error("Retry limit exceeded. Exit!")
-                        exit(1)
+                        sys.exit(1)
 
                     response = requests.get(url_image, stream=True)
                     if 200 <= response.status_code <= 299:
@@ -59,7 +60,7 @@ class WalmartProductDetail:
                         log.error(f"Failed to download the product image. Got {response.status_code}. Retrying ({retry}) ...")
                 except Exception as e:
                     retry += 1
-                    log.error(f"Failed to fetch the product. No response. Retrying ({retry}) ...")
+                    log.error(f"Failed to fetch the product image. No response. Retrying ({retry}) ...")
 
 
     def humanize_title(self, title):
@@ -86,9 +87,9 @@ class WalmartProductDetail:
         retry_limit, retry = RETRY_LIMIT, 0
         while True:
             try:
-                if retry > retry_limit:
+                if retry >= retry_limit:
                     log.error("Retry limit exceeded. Exit!")
-                    exit(1)
+                    sys.exit(1)
 
                 response = requests.get(url, headers=HEADERS)
                 if 200 <= response.status_code <= 299:
@@ -111,22 +112,44 @@ class WalmartProductDetail:
                 else:
                     retry += 1
                     log.error(f"Failed to fetch the product. Got {response.status_code}. Retrying ({retry}) ...")
+
             except Exception as e:
                     retry += 1
-                    log.error(f"Failed to fetch the product. No response. Retrying ({retry}) ...")
+                    log.error(f"Failed to fetch the product from {url}. No response. Retrying ({retry}) ...")
 
 
 class WalmartProductList:
 
-    def __init__(self, url, type_, id_, manager):
+    def __init__(self, url, type_, id_, manager, args):
         self.url = url
         self.type = type_
         self.id = id_
         self.manager = manager
+        self.args = args
+        self.page_ranges = None
+
+    def get_page_ranges(self):
+        if self.args.batch:
+            print("Enter page ranges:")
+            print("page_from: ")
+            page_from = int(input())
+            print("page_to: ")
+            page_to = int(input())
+            page_total = self.manager.meta["total_pages"]
+
+            if not ((1 <= page_from <= page_total) or (1 <= page_from <= page_total)):
+                log.error(f"Page ranges should be within 1...{page_total}!")
+                self.get_page_ranges()
+
+            self.page_ranges = [page_from, page_to]
+            return page_from, page_to
+        else:
+            return 1, self.manager.meta["total_pages"]
 
     def get(self):
+        page, page2 = self.get_page_ranges()
+        count, data, error = 1, [], False
         try:
-            page, count, data, error = 1, 1, [], False
             while True:
                 if self.type == "node":
                     url = URL_PRODUCT_LIST_NODE.format(limit=LIMIT, page=page, store_id=STORE_ID, node_id=self.id)
@@ -139,17 +162,17 @@ class WalmartProductList:
                     product_detail = WalmartProductDetail(product["USItemId"], product["basic"]["productUrl"], self.manager).get()
                     data.append(product_detail)
 
-                    if count % 5 == 0:
+                    if count % 10 == 0:
                         log.info(f"{count} products has been fetched so far ...")
                     count += 1
 
                 page += 1
-                if page > self.manager.meta["total_pages"]:
+                if page > page2:
                     break
 
         except Exception as e:
             error = True
-            log.error("Error: " + e)
+            log.error(f"Error: {e}")
             traceback.print_exc()
         finally:
             return data, error
@@ -159,8 +182,9 @@ class WalmartManager:
     dir_output = os.path.join(os.getcwd(), "output")
     dir_images = os.path.join(dir_output, "images")
 
-    def __init__(self, url):
+    def __init__(self, url, args):
         self.url = url
+        self.args = args
         self.type = "node" if "aisle=" in self.url else "shelf"
         self.meta = self.load_meta_data()
 
@@ -169,7 +193,6 @@ class WalmartManager:
             self.dir_images = os.path.join(WalmartManager.dir_output, "images", self.meta["categ"])
         else:
             self.dir_images = os.path.join(WalmartManager.dir_output, "images", f"{self.meta['shelf_name']}")
-        self.file_xlsx = os.path.join(self.dir_xlsx, self.get_xlsx_filename())
 
         self.data = []
 
@@ -192,15 +215,17 @@ class WalmartManager:
         meta["shelf_name"] = response.get("manualShelfName", "NA").replace(" ", "-")
         meta["total_products"] = response.get("totalCount", 0)
         meta["total_pages"] = math.ceil(meta["total_products"] / LIMIT)
-        log.info(f"{meta['total_products']} products found!")
+        log.info(f"{meta['total_products']} products found! {meta['total_pages']} pages to be scraped.")
         return meta
 
-    def get_xlsx_filename(self):
+    def get_xlsx_filepath(self, filename_suffix=""):
         if self.type == "node":
             categ, sub_categ = self.meta["categ"], self.meta["sub_categ"]
-            return f"{categ}_{sub_categ}.xlsx"
+            filename = f"{categ}_{sub_categ}"
         else:
-            return f"{self.meta['shelf_name']}.xlsx"
+            filename = f"{self.meta['shelf_name']}"
+        filename += filename_suffix
+        return os.path.join(self.dir_xlsx, f"{filename}.xlsx")
 
     def get_categ(self, response):
         categs = []
@@ -225,17 +250,21 @@ class WalmartManager:
             url=self.url, 
             type_=self.type,
             id_=self.get_node_id() if self.type == "node" else self.get_shelf_id(),
-            manager=self
+            manager=self,
+            args=self.args
         )
         data, error = product_list.get()
         self.data = data
-        self.save()
+
+        suffix = f"_{product_list.page_ranges[0]}_{product_list.page_ranges[1]}" if self.args.batch else ""
+        xlsx_file = self.get_xlsx_filepath(suffix)
+        self.save(fp=xlsx_file)
         if error:
-            exit(1)
+            sys.exit(1)
 
         return self.data
 
-    def save(self):
+    def save(self, fp):
         if self.data:
             df = pd.DataFrame(self.data)
             df["category"] = self.meta["categ"].replace("-", " ")
@@ -245,18 +274,29 @@ class WalmartManager:
                 "sku", "name", "category", "sub_category", "mrp", "cost_price", 
                 "weight", "details", "nutrition_facts", "url_image", "url_product", "url_category"]
             df_ordered = df[columns]
-            df_ordered.to_excel(self.file_xlsx, index=False)
-            log.info(f"Fetched data ({len(df_ordered)}/{self.meta['total_products']}) has been stored in {self.file_xlsx}.")
+            df_ordered.to_excel(fp, index=False)
+            log.info(f"Fetched data ({len(df_ordered)}/{self.meta['total_products']}) has been stored in {fp}.")
         else:
             log.info("Nothing to save!")
+
+
+def get_args():
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument('--batch-mode', dest="batch", action="store_true")
+    return arg_parser.parse_args()
 
 
 def main():
     start = dt.now()
     log.info("Script starts at: {}".format(start.strftime("%d-%m-%Y %H:%M:%S %p")))
 
+    args = get_args()
     with open("url_categories.txt", "r") as f:
         urls = f.read().strip().split("\n")
+        if args.batch:
+            if len(urls) > 1:
+                log.error("Only one url can be loaded in url_categories.txt in Batch Mode!")
+                sys.exit(1)
 
     urls_done = []
     try:
@@ -264,20 +304,21 @@ def main():
             print("-----------" + "-" * len(url))
             print(f"Fetching: {url}")
             print("-----------" + "-" * len(url))
-            walmart = WalmartManager(url)
+            walmart = WalmartManager(url, args)
             walmart.setup()
             walmart.get()
 
             urls_done.append(url)
     except Exception as e:
         log.error(f"Error: {e}")
-        print(traceback.print_exc())
+        print("Traceback:\n", traceback.print_exc())
 
         urls_pending = list((set(urls) - set(urls_done)))
         with open("urls_pending.txt", "w+") as f:
             f.write("\n".join(urls_pending))
             log.info("Pending urls to be fetched are stored in urls_pending.txt")
-    
+        sys.exit(1)
+
     end = dt.now()
     log.info("Script ends at: {}".format(end.strftime("%d-%m-%Y %H:%M:%S %p")))
     elapsed = round(((end - start).seconds / 60), 4)
