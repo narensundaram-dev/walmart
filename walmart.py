@@ -40,11 +40,27 @@ class WalmartProductDetail:
         if url_image != "NA":
             extn = re.search(r"(\.\w+)\?", url_image).group(1)
             fp = os.path.join(self.manager.dir_images, f"{self.product_id}.{extn}")
-            response = requests.get(url_image, stream=True)
-            if response.status_code == 200:
-                with open(fp, "wb+") as f:
-                    response.raw.decode_content = True
-                    shutil.copyfileobj(response.raw, f) 
+
+            retry_limit, retry = RETRY_LIMIT, 0
+            while True:
+                try:
+                    if retry > retry_limit:
+                        log.error("Retry limit exceeded. Exit!")
+                        exit(1)
+
+                    response = requests.get(url_image, stream=True)
+                    if 200 <= response.status_code <= 299:
+                        with open(fp, "wb+") as f:
+                            response.raw.decode_content = True
+                            shutil.copyfileobj(response.raw, f) 
+                        break
+                    else:
+                        retry += 1
+                        log.error(f"Failed to download the product image. Got {response.status_code}. Retrying ({retry}) ...")
+                except Exception as e:
+                    retry += 1
+                    log.error(f"Failed to fetch the product. No response. Retrying ({retry}) ...")
+
 
     def humanize_title(self, title):
         title_arr = map(lambda x: x.title(), re.findall(r'[a-zA-Z](?:[a-z]+|[A-Z]*(?=[A-Z]|$))', title))
@@ -66,23 +82,38 @@ class WalmartProductDetail:
 
     def get(self):
         url = URL_PRODUCT_DETAIL.format(product_id=self.product_id, store_id=STORE_ID)
-        response = requests.get(url, headers=HEADERS).json()
 
-        details = self.get_details(response.get("detailed", {}))
-        url_image = response.get("basic", {}).get("image", {}).get("large", "NA")
-        self.save_image(url_image)
-        return {
-            "sku": response.get("sku", "NA"),
-            "product_code": response.get("detailed", {}).get("productCode", "NA"),
-            "name": response.get("basic", {}).get("name", "NA"),
-            "mrp": response.get("store", {}).get("price", {}).get("previousPrice", None),
-            "cost_price": response.get("store", {}).get("price", {}).get("displayPrice", None),
-            "weight": response.get("store", {}).get("price", {}).get("displayUnitPrice", "NA"),
-            "url_image": url_image,
-            "details": details,
-            "nutrition_facts": json.dumps(response.get("nutritionFacts", "NA")),
-            "url_product": BASE_URL + self.url
-        }
+        retry_limit, retry = RETRY_LIMIT, 0
+        while True:
+            try:
+                if retry > retry_limit:
+                    log.error("Retry limit exceeded. Exit!")
+                    exit(1)
+
+                response = requests.get(url, headers=HEADERS)
+                if 200 <= response.status_code <= 299:
+                    data = response.json()
+                    details = self.get_details(data.get("detailed", {}))
+                    url_image = data.get("basic", {}).get("image", {}).get("large", "NA")
+                    self.save_image(url_image)
+                    return {
+                        "sku": data.get("sku", "NA"),
+                        "product_code": data.get("detailed", {}).get("productCode", "NA"),
+                        "name": data.get("basic", {}).get("name", "NA"),
+                        "mrp": data.get("store", {}).get("price", {}).get("previousPrice", None),
+                        "cost_price": data.get("store", {}).get("price", {}).get("displayPrice", None),
+                        "weight": data.get("store", {}).get("price", {}).get("displayUnitPrice", "NA"),
+                        "url_image": url_image,
+                        "details": details,
+                        "nutrition_facts": json.dumps(data.get("nutritionFacts", "NA")),
+                        "url_product": BASE_URL + self.url
+                    }
+                else:
+                    retry += 1
+                    log.error(f"Failed to fetch the product. Got {response.status_code}. Retrying ({retry}) ...")
+            except Exception as e:
+                    retry += 1
+                    log.error(f"Failed to fetch the product. No response. Retrying ({retry}) ...")
 
 
 class WalmartProductList:
@@ -113,12 +144,13 @@ class WalmartProductList:
                     count += 1
 
                 page += 1
-                if page >= self.manager.meta["total_pages"]:
+                if page > self.manager.meta["total_pages"]:
                     break
 
         except Exception as e:
             error = True
             log.error("Error: " + e)
+            traceback.print_exc()
         finally:
             return data, error
 
@@ -159,7 +191,7 @@ class WalmartManager:
         meta["categ"], meta["sub_categ"] = self.get_categ(response)
         meta["shelf_name"] = response.get("manualShelfName", "NA").replace(" ", "-")
         meta["total_products"] = response.get("totalCount", 0)
-        meta["total_pages"] = math.ceil(meta["total_products"]/LIMIT)
+        meta["total_pages"] = math.ceil(meta["total_products"] / LIMIT)
         log.info(f"{meta['total_products']} products found!")
         return meta
 
