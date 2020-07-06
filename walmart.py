@@ -103,9 +103,6 @@ class WalmartProductList:
                     url = URL_PRODUCT_LIST_SHELF.format(limit=LIMIT, page=page, store_id=STORE_ID, shelf_id=self.id)
                 response = requests.get(url=url, headers=HEADERS).json()
 
-                if not response["products"]:
-                    break
-
                 log.info(f"            *** Page: {page} ***            ")
                 for product in response["products"]:
                     product_detail = WalmartProductDetail(product["USItemId"], product["basic"]["productUrl"], self.manager).get()
@@ -116,6 +113,9 @@ class WalmartProductList:
                     count += 1
 
                 page += 1
+                if page >= self.manager.meta["total_pages"]:
+                    break
+
         except Exception as e:
             error = True
             log.error("Error: " + e)
@@ -159,6 +159,7 @@ class WalmartManager:
         meta["categ"], meta["sub_categ"] = self.get_categ(response)
         meta["shelf_name"] = response.get("manualShelfName", "NA").replace(" ", "-")
         meta["total_products"] = response.get("totalCount", 0)
+        meta["total_pages"] = math.ceil(meta["total_products"]/LIMIT)
         log.info(f"{meta['total_products']} products found!")
         return meta
 
